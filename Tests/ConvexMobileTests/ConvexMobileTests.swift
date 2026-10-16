@@ -356,6 +356,34 @@ final class ConvexMobileTests: XCTestCase {
     XCTAssertNil(fakeFfiClient.authProvider)
   }
 
+  func testRetainedAuthBridgeDoesNotRetainFfiClient() async throws {
+    // No initial token push: the test has no unstructured callback task whose
+    // scheduling could hide the ownership regression behind a timing wait.
+    var ffiClient: FakeMobileConvexClient? = FakeMobileConvexClient()
+    var client: ConvexMobile.ConvexClientWithAuth<String>? =
+      ConvexMobile.ConvexClientWithAuth(
+        ffiClient: try XCTUnwrap(ffiClient), authProvider: NonPushingAuthProvider())
+    weak var weakFfiClient = ffiClient
+    weak var weakClient = client
+    // Also break the fake's cycle when this test is run against the original
+    // strong capture, so an expected failing assertion does not leak the fake.
+    defer { weakFfiClient?.authProvider = nil }
+
+    let result = await client!.login()
+    XCTAssertEqual(try result.get(), NonPushingAuthProvider.CREDENTIALS)
+    let retainedBridge = try XCTUnwrap(ffiClient?.authProvider)
+
+    // Model Rust retaining its installed provider after both Swift-facing
+    // owners have gone away. Do not logout or release that provider first.
+    client = nil
+    ffiClient = nil
+
+    withExtendedLifetime(retainedBridge) {
+      XCTAssertNil(weakClient, "The installed auth bridge must not retain the Swift client")
+      XCTAssertNil(weakFfiClient, "The installed auth bridge must not own the FFI client's runtime")
+    }
+  }
+
   func testLoginUpdatesAuthState() async throws {
     let expectation = self.expectation(description: "authState")
     var credentials: String?
@@ -542,6 +570,22 @@ class FakeMobileConvexClient: UniFFI.MobileConvexClientProtocol {
     return FakeSubscriptionHandle(client: self)
   }
 
+}
+
+private final class NonPushingAuthProvider: AuthProvider {
+  static let CREDENTIALS = "lifetime-test-credentials"
+
+  func login(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> String {
+    Self.CREDENTIALS
+  }
+
+  func loginFromCache(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> String {
+    Self.CREDENTIALS
+  }
+
+  func logout() async throws {}
+
+  func extractIdToken(from authResult: String) -> String { "extracted: \(authResult)" }
 }
 
 class FakeAuthProvider: AuthProvider {

@@ -330,8 +330,11 @@ public class ConvexClientWithAuth<T>: ConvexClient {
   /// This handler is passed to the auth provider during login and should be called
   /// whenever a fresh token is available or when the session becomes invalid.
   private func onIdTokenHandler() -> @Sendable (String?) -> Void {
-    { [ffiClient, authPublisher, weak self] token in
+    // Rust retains the bridge and this callback. A strong FFI capture would let
+    // its auth worker become the final owner of the client's Tokio runtime.
+    { [weak ffiClient, authPublisher, weak self] token in
       Task {
+        guard let ffiClient else { return }
         do {
           if let token {
             await self?.authBridge?.updateToken(token)
